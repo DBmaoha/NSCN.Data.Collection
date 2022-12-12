@@ -1,0 +1,217 @@
+global function NSCN_PlayerData_Collect_Init
+
+const bool PLAYER_DATA_DEBUG = true
+
+global struct PlayerMatchData
+{
+    string playerUID = ""
+    int pilotDamage = 0
+    int titanDamage = 0
+    bool winThisGame = false
+    int killCount = 0
+    int deathCount = 0
+    int assistCount = 0
+
+    // for debugging
+    string playerName = ""
+}
+
+struct
+{
+    table< string, PlayerMatchData > matchDataTable
+} file
+
+void function NSCN_PlayerData_Collect_Init()
+{
+    AddCallback_OnClientConnected( InitPlayerDataStruct )
+    AddCallback_OnClientDisconnected( UploadPlayerDataForDisconnect )
+    AddPostDamageCallback( "player", UpdatePlayerDamage ) // post damage can mostly get player's final damage
+    AddPostDamageCallback( "npc_titan", UpdatePlayerDamage ) // only add for player's pet titan!
+    AddDeathCallback( "player", UpdatePlayerKillAssistDeath )
+    AddCallback_GameStateEnter( eGameState.WinnerDetermined, UploadAllPlayerDataForWinnerDetermined )
+}
+
+void function InitPlayerDataStruct( entity player )
+{
+    string uid = player.GetUID()
+    string name = player.GetPlayerName()
+
+    PlayerMatchData emptyStruct
+    file.matchDataTable[ uid ] <- emptyStruct
+    file.matchDataTable[ uid ].playerUID = uid
+
+    // for debugging
+    #if PLAYER_DATA_DEBUG
+        file.matchDataTable[ uid ].playerName = name
+    #endif // PLAYER_DATA_DEBUG
+}
+
+void function UpdatePlayerDamage( entity victim, var damageInfo )
+{
+    // for npc titans!
+    if( victim.IsNPC() )
+    {
+        if( !victim.IsTitan() )
+            return
+        entity soul = victim.GetTitanSoul()
+        if( !IsValid( soul ) )
+            return
+        // soul valid, try to do pet titan check
+        if( !IsPetTitan( victim ) )
+            return
+    }
+
+    entity attacker = DamageInfo_GetAttacker( damageInfo )
+    if( !IsValid( attacker ) )
+        return
+    if( !attacker.IsPlayer() )
+        return
+    if( attacker == victim ) // self damages
+        return
+    
+    string uid = attacker.GetUID()
+
+    if( uid in file.matchDataTable )
+    {
+        int damageAmount = int( DamageInfo_GetDamage( damageInfo ) )
+        int victimHealthLeft = victim.GetHealth()
+
+        if( victim.IsTitan() )
+            damageAmount = CalculateTitanDamage( victim, attacker, damageInfo )
+        else if( victimHealthLeft <= damageAmount ) // this is a killshot
+            damageAmount = victimHealthLeft
+
+        if( victim.IsTitan() )
+            file.matchDataTable[ uid ].titanDamage += damageAmount
+        else
+            file.matchDataTable[ uid ].pilotDamage += damageAmount
+
+        // for debugging
+        #if PLAYER_DATA_DEBUG
+            DEBUG_PrintPlayerMatchData( file.matchDataTable[ uid ] )
+        #endif // PLAYER_DATA_DEBUG
+    }
+}
+
+int function CalculateTitanDamage( entity victim, entity attacker, var damageInfo )
+{
+    if( !victim.IsTitan() )
+        return 0
+
+    // should check victim's health!!
+	int damageAmount = int( DamageInfo_GetDamage( damageInfo ) )
+	int healthLeft = victim.GetHealth() // cast to float for later comparisons
+	entity titanSoul = victim.GetTitanSoul()
+	float doomedTime = 0.0
+	float currentTime = Time()
+	if( IsValid( titanSoul ) )
+		doomedTime = titanSoul.soul.doomedStartTime
+
+	// since DoomTitan() is done in damaged callback instead of post damage, we can't get undoomed titan's killshot
+	if( GetDoomedState( victim ) )
+	{
+		// consider this is a undoomed killshot, add 1 more damage
+		if ( healthLeft - 1 == damageAmount && doomedTime == currentTime ) 
+			damageAmount += 1
+		// consider this is a doomed killshot, don't add additional damage to stat
+		else if ( healthLeft <= damageAmount )
+			damageAmount = healthLeft
+	}
+
+    return damageAmount
+}
+
+void function UpdatePlayerKillAssistDeath( entity victim, var damageInfo )
+{
+    entity attacker = DamageInfo_GetAttacker( damageInfo )
+    if( !IsValid( attacker ) )
+        return
+    if( !attacker.IsPlayer() )
+        return
+
+    bool isSuicide = attacker == victim
+
+    string victimUID = victim.GetUID()
+    if( victimUID in file.matchDataTable )
+    {
+        file.matchDataTable[ victimUID ].deathCount += 1
+
+        // for debugging
+        #if PLAYER_DATA_DEBUG
+            DEBUG_PrintPlayerMatchData( file.matchDataTable[ victimUID ] )
+        #endif // PLAYER_DATA_DEBUG
+    }
+
+    string attackerUID = attacker.GetUID()
+    if( attackerUID in file.matchDataTable && !isSuicide ) // no killCount if suicide
+    {
+        file.matchDataTable[ attackerUID ].killCount += 1
+        file.matchDataTable[ attackerUID ].assistCount = attacker.GetPlayerGameStat( PGS_ASSISTS ) // special update
+    
+        // for debugging
+        #if PLAYER_DATA_DEBUG
+            DEBUG_PrintPlayerMatchData( file.matchDataTable[ attackerUID ] )
+        #endif // PLAYER_DATA_DEBUG
+    }
+}
+
+void function UploadPlayerDataForDisconnect( entity player )
+{
+    string uid = player.GetUID()
+
+    if( uid in file.matchDataTable )
+    {
+        UploadPlayerDataToMasterServer( file.matchDataTable[ uid ] )
+        delete file.matchDataTable[ uid ]
+    }
+}
+
+void function UploadAllPlayerDataForWinnerDetermined()
+{
+    int winningTeam = expect int( GetServerVar( "winningTeam" ) )
+
+    if( IsRoundBased() ) // check for round based modes
+	{
+		if( winningTeam == TEAM_UNASSIGNED )
+			return
+		if( GameRules_GetTeamScore( winningTeam ) != GameMode_GetRoundScoreLimit( GAMETYPE ) ) // don't upload till game really ends
+			return
+	}
+
+    foreach( entity player in GetPlayerArray() )
+    {
+        string uid = player.GetUID()
+        if( uid in file.matchDataTable )
+        {
+            if( player.GetTeam() == winningTeam )
+                file.matchDataTable[ uid ].winThisGame = true // this player wins
+            UploadPlayerDataToMasterServer( file.matchDataTable[ uid ] )
+        }
+    }
+}
+
+// stub
+void function UploadPlayerDataToMasterServer( PlayerMatchData data )
+{
+
+    
+    // for debugging
+    #if PLAYER_DATA_DEBUG
+        DEBUG_PrintPlayerMatchData( file.matchDataTable[ data.playerUID ] )
+    #endif // PLAYER_DATA_DEBUG
+}
+
+// for debugging
+void function DEBUG_PrintPlayerMatchData( PlayerMatchData data )
+{
+    string name = data.playerName
+    string uid = data.playerUID
+    string prefix = "[DATA COLLECTION] " + name + "[ " + uid + " ]"
+
+    print( prefix + "'s pilot damage is: " + string( data.pilotDamage ) )
+    print( prefix + "'s titan damage is: " + string( data.titanDamage ) )
+    print( prefix + " won game: " + string( data.winThisGame ) )
+    print( prefix + "'s kill count is: " + string( data.killCount ) )
+    print( prefix + "'s death count is: " + string( data.deathCount ) )
+    print( prefix + "'s assist count is: " + string( data.assistCount ) )
+}

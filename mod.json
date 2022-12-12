@@ -1,0 +1,16 @@
+{
+	"Name" : "NSCN Player Data Collection",
+	"Description" : "Collect player's match data and upload to MasterServer, for better Match Making",
+	"Version": "0.2",
+	"LoadPriority": 0,
+
+	"Scripts": [
+		{
+			"Path": "nscn_data_collect.gnut",
+			"RunOn": "SERVER && MP",
+			"ServerCallback": {
+				"After": "NSCN_PlayerData_Collect_Init"
+			}
+		}
+	]
+}
